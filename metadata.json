@@ -1,0 +1,5 @@
+{
+  "name": "iCal Workday Converter",
+  "description": "Converts standard iCal feeds into simplified workday events (06:00-06:00) using a unified serverless architecture.",
+  "requestFramePermissions": []
+}
