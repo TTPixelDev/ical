@@ -1,21 +1,12 @@
 import mongoose from 'mongoose';
 
-// Ensure MONGODB_URI is defined
 const MONGODB_URI = process.env.MONGODB_URI;
 
-if (!MONGODB_URI) {
-  throw new Error(
-    'Please define the MONGODB_URI environment variable inside .env.local or Vercel settings'
-  );
-}
-
-// Interface to add to global scope for caching
 interface MongooseCache {
   conn: typeof mongoose | null;
   promise: Promise<typeof mongoose> | null;
 }
 
-// Add strict typing to global
 declare global {
   // eslint-disable-next-line no-var
   var mongoose: MongooseCache | undefined;
@@ -28,6 +19,11 @@ if (!cached) {
 }
 
 async function dbConnect() {
+  if (!MONGODB_URI) {
+    // Graceful no-op when MongoDB is not configured
+    return null;
+  }
+
   if (cached!.conn) {
     return cached!.conn;
   }
@@ -37,8 +33,8 @@ async function dbConnect() {
       bufferCommands: false,
     };
 
-    cached!.promise = mongoose.connect(MONGODB_URI!, opts).then((mongoose) => {
-      return mongoose;
+    cached!.promise = mongoose.connect(MONGODB_URI, opts).then((mongooseInstance) => {
+      return mongooseInstance;
     });
   }
 

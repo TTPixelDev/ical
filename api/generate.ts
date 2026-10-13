@@ -1,7 +1,6 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import dbConnect from '../lib/mongoose.js';
-import ICalUrl from '../models/ICalUrl.js';
-import { processICalUrl } from '../lib/icalService.js';
+import { extractMergedShifts, createSimplifiedICal, generateUniqueId, fetchICalData, formatMinutes } from '../lib/icalService.js';
+import { saveCalendar } from '../lib/storage.js';
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method !== 'POST') {
@@ -9,48 +8,60 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   try {
-    await dbConnect();
-    
-    const { url, summary = 'Jobb' } = req.body;
-    const timezone = process.env.TIMEZONE || 'Europe/Stockholm';
+    const { url, rawIcalContent, summary = 'Jobb', timezone = 'Europe/Stockholm', maxBreakMinutes = 120 } = req.body;
 
-    if (!url) return res.status(400).json({ error: 'URL is required' });
-
-    // Validate URL format roughly
-    if (!url.startsWith('http') && !url.startsWith('webcals')) {
-      return res.status(400).json({ error: 'Invalid URL format' });
+    let icalString = rawIcalContent;
+    if (!icalString && url) {
+      icalString = await fetchICalData(url);
     }
 
-    const result = await processICalUrl(url, summary, timezone);
+    if (!icalString) {
+      return res.status(400).json({ error: 'URL or rawIcalContent is required' });
+    }
 
-    // Save/Update in DB
-    await ICalUrl.findOneAndUpdate(
-      { uniqueId: result.uniqueId },
-      {
-        url,
-        summary,
-        icalContent: result.icalContent,
-        lastUpdated: new Date()
-      },
-      { upsert: true, new: true }
-    );
+    const processOpts = {
+      summary,
+      timezone,
+      maxBreakMinutes: Number(maxBreakMinutes) || 120
+    };
 
-    // Construct return URLs
-    // Note: 'host' header gives the domain (e.g., project.vercel.app)
+    const shifts = extractMergedShifts(icalString, processOpts);
+    const icalContent = createSimplifiedICal(shifts, processOpts);
+    const uniqueId = generateUniqueId(url || icalString.slice(0, 100), summary);
+
+    const totalMinutes = shifts.reduce((acc, s) => acc + s.durationMinutes, 0);
+
+    await saveCalendar({
+      uniqueId,
+      url: url || undefined,
+      summary,
+      timezone,
+      maxBreakMinutes: processOpts.maxBreakMinutes,
+      icalContent,
+      shiftCount: shifts.length,
+      totalHours: formatMinutes(totalMinutes),
+      lastUpdated: new Date().toISOString(),
+      createdAt: new Date().toISOString()
+    });
+
     const protocol = req.headers['x-forwarded-proto'] || 'https';
     const host = req.headers['host'];
-    
-    // We use a query param for simpler serverless routing without rewrite config
-    const apiUrl = `${protocol}://${host}/api/calendar?id=${result.uniqueId}`;
+    const apiUrl = `${protocol}://${host}/api/calendar?id=${uniqueId}`;
+    const cleanHost = (host as string || '').replace(/^https?:\/\//, '');
+    const webcalUrl = `webcal://${cleanHost}/api/calendar?id=${uniqueId}`;
     const googleLink = `https://www.google.com/calendar/render?cid=${encodeURIComponent(apiUrl)}`;
+    const downloadUrl = `${apiUrl}&download=1`;
 
     return res.status(200).json({
       apiUrl,
+      webcalUrl,
       googleLink,
-      uniqueId: result.uniqueId,
-      lastUpdated: new Date()
+      downloadUrl,
+      uniqueId,
+      lastUpdated: new Date().toISOString(),
+      shiftCount: shifts.length,
+      totalHours: formatMinutes(totalMinutes)
     });
-
   } catch (error: any) {
     console.error('Generate Error:', error);
     return res.status(500).json({ error: error.message || 'Internal Server Error' });

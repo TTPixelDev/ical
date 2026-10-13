@@ -38,10 +38,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const updates = calendars.map(async (cal) => {
       try {
         const rawData = await fetchICalData(cal.url);
-        const processedContent = processICalData(rawData, cal.summary, timezone);
+        const result = processICalData(rawData, cal.summary, timezone);
 
         // Update the document
-        cal.icalContent = processedContent;
+        cal.icalContent = result.icalContent;
         cal.lastUpdated = new Date();
         await cal.save();
 

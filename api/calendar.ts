@@ -1,60 +1,59 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import dbConnect from '../lib/mongoose.js';
-import ICalUrl from '../models/ICalUrl.js';
-import { fetchICalData, processICalData } from '../lib/icalService.js';
+import { getCalendar, saveCalendar } from '../lib/storage.js';
+import { fetchICalData, extractMergedShifts, createSimplifiedICal, formatMinutes } from '../lib/icalService.js';
 
-// To ensure data is fresh when Google/Apple fetches it, we try to update on read.
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method !== 'GET') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
   try {
-    await dbConnect();
     const { id } = req.query;
-    
+
     if (!id || typeof id !== 'string') {
       return res.status(400).json({ error: 'ID is required' });
     }
-    
-    const icalDoc = await ICalUrl.findOne({ uniqueId: id });
-    
-    if (!icalDoc) {
+
+    const cal = await getCalendar(id);
+    if (!cal) {
       return res.status(404).json({ error: 'Calendar not found' });
     }
 
-    let contentToSend = icalDoc.icalContent;
+    let contentToSend = cal.icalContent;
 
-    // Optional: Attempt to refresh data on-the-fly if it's old (e.g., > 1 hour)
-    // This removes the need for a background cron job for active calendars.
-    const ONE_HOUR = 60 * 60 * 1000;
-    const shouldRefresh = new Date().getTime() - new Date(icalDoc.updatedAt).getTime() > ONE_HOUR;
-
-    if (shouldRefresh) {
-      try {
-         const timezone = process.env.TIMEZONE || 'Europe/Stockholm';
-         const rawData = await fetchICalData(icalDoc.url);
-         const processed = processICalData(rawData, icalDoc.summary, timezone);
-         
-         // Update DB asynchronously (fire and forget for this request to speed up response)
-         // Note: In some serverless envs, this might die if function freezes, but usually OK for small updates
-         await ICalUrl.findOneAndUpdate(
-           { uniqueId: id },
-           { icalContent: processed, lastUpdated: new Date() },
-           {}
-         );
-         contentToSend = processed;
-      } catch (err) {
-         console.warn(`Failed to auto-refresh calendar ${id}, serving cached version.`);
+    if (cal.url) {
+      const ONE_HOUR = 30 * 60 * 1000;
+      if (Date.now() - new Date(cal.lastUpdated).getTime() > ONE_HOUR) {
+        try {
+          const rawData = await fetchICalData(cal.url);
+          const shifts = extractMergedShifts(rawData, {
+            summary: cal.summary,
+            timezone: cal.timezone,
+            maxBreakMinutes: cal.maxBreakMinutes
+          });
+          contentToSend = createSimplifiedICal(shifts, {
+            summary: cal.summary,
+            timezone: cal.timezone
+          });
+          cal.icalContent = contentToSend;
+          cal.shiftCount = shifts.length;
+          cal.totalHours = formatMinutes(shifts.reduce((acc, s) => acc + s.durationMinutes, 0));
+          cal.lastUpdated = new Date().toISOString();
+          await saveCalendar(cal);
+        } catch (err) {
+          console.warn(`Failed to auto-refresh calendar ${id}, serving cached version:`, err);
+        }
       }
     }
 
-    res.setHeader('Content-Type', 'text/calendar; charset=utf-8');
-    res.setHeader('Content-Disposition', 'attachment; filename=calendar.ics');
-    res.send(contentToSend);
+    const filename = `${cal.summary.toLowerCase().replace(/[^a-z0-9]/gi, '_') || 'arbetsschema'}.ics`;
 
+    res.setHeader('Content-Type', 'text/calendar; charset=utf-8');
+    res.setHeader('Content-Disposition', `inline; filename="${filename}"`);
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    return res.send(contentToSend);
   } catch (error: any) {
     console.error('Calendar Fetch Error:', error);
-    res.status(500).json({ error: 'Internal Server Error' });
+    return res.status(500).json({ error: 'Internal Server Error' });
   }
 }
